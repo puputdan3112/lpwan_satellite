@@ -1,0 +1,299 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
+import math
+
+# Parameter Satelit
+satellite_altitude = 600  # km (LEO satellite)
+satellite_velocity = 7.8  # km/s
+earth_radius = 6371  # km
+c = 3e8  # Kecepatan cahaya (m/s)
+
+# Parameter LoRaWAN
+frequency = 868e6  # Hz (868 MHz)
+bandwidth = 125e3  # Hz (125 kHz)
+tx_power = 14  # dBm
+spreading_factors = [7, 8, 9, 10, 11, 12]
+payload_size = 50  # bytes
+coding_rate = 4/5  # 4/5
+preamble_length = 8  # symbols
+has_header = True
+has_crc = True
+
+# Parameter Antena dan Sistem
+tx_gain = 3  # dBi (transmitter gain)
+rx_gain = 12  # dBi (satellite receiver gain)
+noise_figure = 6  # dB
+system_losses = 2  # dB
+
+# Parameter Atmosfer
+rain_rates = [0, 5, 10, 25, 50]  # mm/h
+cloud_water = [0, 0.5, 1, 2]  # g/m³
+scintillation_index = 0.5  # variabel indeks scintillation
+
+def calculate_distance(elevation_angle):
+    """Menghitung jarak antara ground station dan satelit berdasarkan sudut elevasi"""
+    if elevation_angle == 90:
+        return satellite_altitude
+    else:
+        elev_rad = math.radians(elevation_angle)
+        # Rumus yang benar untuk jarak berdasarkan sudut elevasi
+        sin_term = math.sin(elev_rad)
+        term_under_sqrt = (earth_radius + satellite_altitude)**2 - (earth_radius**2) * (1 - sin_term**2)
+        
+        if term_under_sqrt < 0:
+            return satellite_altitude  # Fallback jika perhitungan menghasilkan nilai invalid
+        
+        distance = math.sqrt(term_under_sqrt) - earth_radius * sin_term
+        return max(distance, 0.1)  # Pastikan jarak minimal 0.1 km untuk menghindari log(0)
+
+def calculate_fspl(distance, freq):
+    """Menghitung Free Space Path Loss"""
+    # Pastikan distance dan freq positif
+    distance_km = max(distance, 0.1)  # Minimal 0.1 km
+    freq_mhz = max(freq / 1e6, 0.1)  # Minimal 0.1 MHz
+    return 20 * math.log10(distance_km) + 20 * math.log10(freq_mhz) + 32.45
+
+def calculate_doppler_shift(elevation_angle):
+    """Menghitung pergeseran Doppler berdasarkan sudut elevasi"""
+    elev_rad = math.radians(elevation_angle)
+    relative_velocity = satellite_velocity * 1000 * math.cos(elev_rad)  # m/s
+    return (relative_velocity / c) * frequency
+
+def calculate_rain_attenuation(rain_rate, elevation_angle):
+    """Menghitung redaman hujan berdasarkan model sederhana"""
+    # Model sangat sederhana untuk simulasi, dalam praktiknya gunakan ITU-R P.618
+    if rain_rate == 0:
+        return 0
+    
+    # Nilai k dan α tergantung frekuensi dan polarisasi
+    # Untuk 868 MHz, nilai perkiraan
+    k = 0.01
+    alpha = 1.1
+    
+    # Panjang lintasan efektif bergantung pada sudut elevasi
+    path_length = 5 / max(math.sin(math.radians(elevation_angle)), 0.1)
+    if path_length > 10:
+        path_length = 10
+    
+    return k * (rain_rate ** alpha) * path_length
+
+def calculate_cloud_attenuation(cloud_water_content, elevation_angle):
+    """Menghitung redaman awan berdasarkan model sederhana"""
+    # Model sangat sederhana untuk simulasi, dalam praktiknya gunakan ITU-R P.840
+    if cloud_water_content == 0:
+        return 0
+    
+    # Koefisien redaman spesifik (dB/km)/(g/m³)
+    Kl = 0.05  # perkiraan untuk 868 MHz
+    
+    # Panjang lintasan melalui awan (km)
+    path_length = 2 / max(math.sin(math.radians(elevation_angle)), 0.1)
+    if path_length > 5:
+        path_length = 5
+    
+    return Kl * cloud_water_content * path_length
+
+def calculate_scintillation(elevation_angle):
+    """Menghitung redaman scintillation"""
+    # Model sederhana untuk scintillation
+    freq_ghz = frequency / 1e9
+    scint_amplitude = scintillation_index * (freq_ghz ** 0.7) * (max(math.sin(math.radians(elevation_angle)), 0.1) ** -1.2)
+    
+    # Batas atas yang masuk akal
+    if scint_amplitude > 3:
+        scint_amplitude = 3
+    
+    return scint_amplitude
+
+def calculate_gas_attenuation(elevation_angle):
+    """Menghitung redaman gas atmosfer"""
+    # Model sangat sederhana untuk simulasi
+    # Untuk 868 MHz, efek gas minimal
+    return 0.1 / max(math.sin(math.radians(elevation_angle)), 0.1)
+
+def calculate_required_snr(sf):
+    """Menghitung SNR minimum berdasarkan spreading factor"""
+    snr_table = {
+        7: -7.5,
+        8: -10,
+        9: -12.5,
+        10: -15,
+        11: -17.5,
+        12: -20
+    }
+    return snr_table[sf]
+
+def calculate_sensitivity(sf):
+    """Menghitung sensitivitas penerima berdasarkan spreading factor"""
+    # Sensitivitas = -174 + 10log10(BW) + NF + SNRmin
+    thermal_noise = -174  # dBm/Hz
+    snr_min = calculate_required_snr(sf)
+    
+    sensitivity = thermal_noise + 10 * math.log10(bandwidth) + noise_figure + snr_min
+    return sensitivity
+
+def calculate_time_on_air(sf, payload_size):
+    """Menghitung waktu transmisi (Time on Air) paket LoRa"""
+    # Optimasi data rate (DE)
+    de = 0
+    if sf >= 11:
+        de = 1
+    
+    # Durasi simbol (ms)
+    ts = (2**sf) / bandwidth * 1000
+    
+    # Jumlah simbol preamble
+    preamble_symbols = preamble_length + 4.25
+    
+    # Header
+    h = 0 if not has_header else 1
+    
+    # CRC
+    crc = 1 if has_crc else 0
+    
+    # Jumlah simbol payload
+    payload_symbols = 8 + max(math.ceil((8*payload_size - 4*sf + 28 + 16*crc - 20*h) / (4*(sf-2*de))) * (coding_rate), 0)
+    
+    # Total waktu (ms)
+    toa = (preamble_symbols + payload_symbols) * ts
+    
+    return toa
+
+def calculate_link_budget(elevation_angle, sf, rain_rate=0, cloud_water_content=0, with_atmosphere=False):
+    """Menghitung link budget lengkap"""
+    distance = calculate_distance(elevation_angle)
+    fspl = calculate_fspl(distance, frequency)
+    
+    if with_atmosphere:
+        rain_attenuation = calculate_rain_attenuation(rain_rate, elevation_angle)
+        cloud_attenuation = calculate_cloud_attenuation(cloud_water_content, elevation_angle)
+        gas_attenuation = calculate_gas_attenuation(elevation_angle)
+        scint_attenuation = calculate_scintillation(elevation_angle)
+        
+        total_loss = fspl + rain_attenuation + cloud_attenuation + gas_attenuation + scint_attenuation + system_losses
+    else:
+        total_loss = fspl + system_losses
+        
+    # Daya terima (Prx = Ptx + Gtx - Lpath + Grx)
+    received_power = tx_power + tx_gain - total_loss + rx_gain
+    
+    # Thermal noise power
+    noise_power = -174 + 10 * math.log10(bandwidth) + noise_figure  # dBm
+    
+    # SNR
+    snr = received_power - noise_power
+    
+    # Link margin
+    required_snr = calculate_required_snr(sf)
+    link_margin = snr - required_snr
+    
+    return {
+        'distance': distance,
+        'fspl': fspl,
+        'received_power': received_power,
+        'snr': snr,
+        'link_margin': link_margin,
+        'rain_attenuation': calculate_rain_attenuation(rain_rate, elevation_angle) if with_atmosphere else 0,
+        'cloud_attenuation': calculate_cloud_attenuation(cloud_water_content, elevation_angle) if with_atmosphere else 0,
+        'gas_attenuation': calculate_gas_attenuation(elevation_angle) if with_atmosphere else 0,
+        'scint_attenuation': calculate_scintillation(elevation_angle) if with_atmosphere else 0
+    }
+
+# Simulasi dengan beragam sudut elevasi
+elevation_angles = np.linspace(5, 90, 50)
+
+# Membuat grid untuk plotting
+plt.figure(figsize=(20, 24))
+gs = GridSpec(6, 2, figure=plt.gcf())
+
+# 1. Plot Link Budget vs Elevation Angle untuk berbagai SF
+ax1 = plt.subplot(gs[0, :])
+for sf in spreading_factors:
+    link_margins = []
+    for elev in elevation_angles:
+        lb = calculate_link_budget(elev, sf)
+        link_margins.append(lb['link_margin'])
+    ax1.plot(elevation_angles, link_margins, label=f'SF{sf}')
+
+ax1.set_xlabel('Sudut Elevasi (derajat)')
+ax1.set_ylabel('Link Margin (dB)')
+ax1.set_title('Link Margin vs Sudut Elevasi untuk Berbagai Spreading Factor')
+ax1.grid(True)
+ax1.legend()
+
+# 2. Plot Free Space Path Loss vs Distance
+ax2 = plt.subplot(gs[1, 0])
+distances = [calculate_distance(elev) for elev in elevation_angles]
+fspl_values = [calculate_fspl(d, frequency) for d in distances]
+ax2.plot(distances, fspl_values)
+ax2.set_xlabel('Jarak (km)')
+ax2.set_ylabel('FSPL (dB)')
+ax2.set_title('Free Space Path Loss vs Jarak')
+ax2.grid(True)
+
+# 3. Plot Doppler Shift vs Elevation Angle
+ax3 = plt.subplot(gs[1, 1])
+doppler_shifts = [calculate_doppler_shift(elev) for elev in elevation_angles]
+ax3.plot(elevation_angles, np.array(doppler_shifts)/1000)  # kHz
+ax3.set_xlabel('Sudut Elevasi (derajat)')
+ax3.set_ylabel('Pergeseran Doppler (kHz)')
+ax3.set_title('Pergeseran Doppler vs Sudut Elevasi')
+ax3.grid(True)
+
+# 4. Plot Required SNR vs Spreading Factor
+ax4 = plt.subplot(gs[2, 0])
+snr_values = [calculate_required_snr(sf) for sf in spreading_factors]
+ax4.bar([f'SF{sf}' for sf in spreading_factors], snr_values)
+ax4.set_xlabel('Spreading Factor')
+ax4.set_ylabel('SNR Minimum (dB)')
+ax4.set_title('SNR Minimum vs Spreading Factor')
+ax4.grid(True)
+
+# 5. Plot Sensitivity vs Spreading Factor
+ax5 = plt.subplot(gs[2, 1])
+sensitivity_values = [calculate_sensitivity(sf) for sf in spreading_factors]
+ax5.bar([f'SF{sf}' for sf in spreading_factors], sensitivity_values)
+ax5.set_xlabel('Spreading Factor')
+ax5.set_ylabel('Sensitivitas (dBm)')
+ax5.set_title('Sensitivitas vs Spreading Factor')
+ax5.grid(True)
+
+# 6. Plot Time on Air vs Spreading Factor
+ax6 = plt.subplot(gs[3, 0])
+toa_values = [calculate_time_on_air(sf, payload_size) for sf in spreading_factors]
+ax6.bar([f'SF{sf}' for sf in spreading_factors], np.array(toa_values)/1000)  # dalam detik
+ax6.set_xlabel('Spreading Factor')
+ax6.set_ylabel('Time on Air (detik)')
+ax6.set_title(f'Time on Air vs Spreading Factor (Payload: {payload_size} bytes)')
+ax6.grid(True)
+
+# 7. Plot Time on Air vs Payload Size
+ax7 = plt.subplot(gs[3, 1])
+payload_sizes = [10, 20, 50, 100, 200, 240]
+toa_by_payload = {sf: [calculate_time_on_air(sf, pl)/1000 for pl in payload_sizes] for sf in [7, 9, 12]}
+for sf, toas in toa_by_payload.items():
+    ax7.plot(payload_sizes, toas, marker='o', label=f'SF{sf}')
+ax7.set_xlabel('Ukuran Payload (bytes)')
+ax7.set_ylabel('Time on Air (detik)')
+ax7.set_title('Time on Air vs Ukuran Payload')
+ax7.grid(True)
+ax7.legend()
+
+# 8. Plot Link Budget dengan Gangguan Atmosfer - Rain
+ax8 = plt.subplot(gs[4, 0])
+sf = 10  # Menggunakan SF10 untuk perbandingan
+for rain in rain_rates:
+    link_margins = []
+    for elev in elevation_angles:
+        lb = calculate_link_budget(elev, sf, rain_rate=rain, with_atmosphere=True)
+        link_margins.append(lb['link_margin'])
+    ax8.plot(elevation_angles, link_margins, label=f'Hujan {rain} mm/h')
+ax8.set_xlabel('Sudut Elevasi (derajat)')
+ax8.set_ylabel('Link Margin (dB)')
+ax8.set_title('Link Margin vs Sudut Elevasi dengan Variasi Curah Hujan (SF10)')
+ax8.grid(True)
+ax8.legend()
+
+# 9. Plot Link Budget dengan Gangguan Atmosfer - Cloud
+ax9 = plt.subplot(
