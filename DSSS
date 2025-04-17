@@ -1,0 +1,207 @@
+%% Simulasi DSSS untuk Komunikasi Satelit LPWAN
+% Kode ini mensimulasikan sistem komunikasi DSSS pada aplikasi satelit LPWAN
+% termasuk modulasi, penyebaran spektrum, kanal satelit, dan demodulasi
+
+clear all;
+close all;
+clc;
+
+%% Parameter Sistem
+% Parameter LPWAN Satelit
+Rb = 100;                  % Bit rate data [bps]
+Rc = 10000;                % Chip rate [chips/s]
+PG = Rc/Rb;                % Processing gain
+fc = 923e6;                % Frekuensi carrier [Hz] (Band UHF)
+SNR_dB = -15:2:5;          % Range SNR untuk simulasi [dB]
+packet_size = 64;          % Ukuran paket [bit]
+num_packets = 100;         % Jumlah paket untuk simulasi
+
+% Parameter karakteristik satelit
+doppler_shift_max = 5000;  % Maksimum Doppler shift [Hz]
+path_loss_dB = 150;        % Path loss satelit-bumi [dB]
+satellite_altitude = 600;  % Ketinggian satelit LEO [km]
+
+% Inisialisasi variabel untuk menyimpan hasil
+BER = zeros(1, length(SNR_dB));
+
+%% Pembangkitan Data dan PN Sequence
+% Pembangkitan data acak
+data = randi([0 1], 1, packet_size*num_packets);
+
+% Pembangkitan PN sequence (menggunakan LFSR untuk Gold code)
+pn_register1 = [1 0 0 0 0];  % Register awal untuk PN generator
+pn_register2 = [1 0 0 0 0];  % Register kedua untuk Gold code
+pn_sequence = zeros(1, PG*length(data));
+
+% Pembangkitan PN sequence menggunakan Gold code
+for i = 1:length(pn_sequence)
+    % Output bit adalah XOR dari bit terakhir kedua register
+    pn_sequence(i) = xor(pn_register1(end), pn_register2(end));
+    
+    % Update register 1 (x^5 + x^2 + 1)
+    feedback1 = xor(pn_register1(1), pn_register1(3));
+    pn_register1 = [feedback1, pn_register1(1:end-1)];
+    
+    % Update register 2 (x^5 + x^4 + x^3 + x + 1)
+    feedback2 = xor(xor(xor(pn_register2(1), pn_register2(2)), pn_register2(3)), pn_register2(5));
+    pn_register2 = [feedback2, pn_register2(1:end-1)];
+end
+
+%% BPSK Modulasi & Spreading
+% Konversi bit data ke simbol BPSK (0 -> -1, 1 -> 1)
+bpsk_data = 2*data - 1;
+
+% Spreading data (mengubah tiap bit menjadi chip sequence)
+spread_data = zeros(1, PG*length(data));
+for i = 1:length(data)
+    for j = 1:PG
+        chip_index = (i-1)*PG + j;
+        spread_data(chip_index) = bpsk_data(i) * (2*pn_sequence(chip_index) - 1);
+    end
+end
+
+% Loop untuk setiap nilai SNR
+for snr_idx = 1:length(SNR_dB)
+    snr = SNR_dB(snr_idx);
+    errors = 0;
+    total_bits = 0;
+    
+    for packet = 1:num_packets
+        % Ekstrak data paket saat ini
+        packet_start = (packet-1)*packet_size + 1;
+        packet_end = packet*packet_size;
+        packet_data = data(packet_start:packet_end);
+        
+        % Ekstrak sinyal spread untuk paket saat ini
+        spread_start = (packet_start-1)*PG + 1;
+        spread_end = packet_end*PG;
+        packet_spread = spread_data(spread_start:spread_end);
+        
+        %% Model Kanal Satelit LPWAN
+        % 1. Efek path loss
+        rx_power = 10^(-path_loss_dB/10) * packet_spread;
+        
+        % 2. Efek Doppler (simulasi sederhana)
+        t = (0:length(packet_spread)-1)/Rc;
+        doppler_shift = doppler_shift_max * sin(2*pi*0.01*t); % Variasi Doppler sederhana
+        doppler_effect = exp(1j*2*pi*cumsum(doppler_shift)/Rc);
+        
+        % Menerapkan efek Doppler (simulasi sederhana)
+        rx_signal_doppler = rx_power .* real(doppler_effect);
+        
+        % 3. Noise AWGN (mempertimbangkan path loss)
+        rx_power_dBm = 10*log10(mean(abs(rx_signal_doppler).^2)) + 30;
+        noise_power_dBm = rx_power_dBm - snr;
+        noise_power = 10^((noise_power_dBm-30)/10);
+        
+        noise = sqrt(noise_power) * randn(size(rx_signal_doppler));
+        rx_signal = rx_signal_doppler + noise;
+        
+        %% Despreading dan Demodulasi
+        % Despreading dengan PN sequence paket
+        despread_signal = zeros(1, packet_size);
+        
+        for i = 1:packet_size
+            chip_start = (i-1)*PG + 1;
+            chip_end = i*PG;
+            chip_segment = rx_signal(chip_start:chip_end);
+            
+            % Regenerasi PN sequence untuk despreading
+            pn_segment = 2*pn_sequence(spread_start+chip_start-1:spread_start+chip_end-1) - 1;
+            
+            % Despreading dengan korelasi
+            despread_signal(i) = sum(chip_segment .* pn_segment) / PG;
+        end
+        
+        % Demodulasi BPSK
+        detected_data = (despread_signal > 0);
+        
+        % Hitung error dan tambahkan ke statistik
+        packet_errors = sum(detected_data ~= packet_data);
+        errors = errors + packet_errors;
+        total_bits = total_bits + packet_size;
+    end
+    
+    % Hitung BER untuk SNR saat ini
+    BER(snr_idx) = errors / total_bits;
+end
+
+%% Visualisasi Hasil
+figure;
+semilogy(SNR_dB, BER, 'bo-', 'LineWidth', 2);
+grid on;
+xlabel('SNR (dB)');
+ylabel('Bit Error Rate (BER)');
+title('Kinerja DSSS untuk Komunikasi Satelit LPWAN');
+
+% Visualisasi spektrum (sebelum dan sesudah spreading)
+figure;
+
+% Data asli (sebelum spreading)
+subplot(2,1,1);
+[psd_data, f_data] = pwelch(bpsk_data, hamming(length(bpsk_data)), [], [], Rb, 'centered');
+plot(f_data, 10*log10(psd_data));
+grid on;
+title('Spektrum Data Asli (Sebelum Spreading)');
+xlabel('Frekuensi (Hz)');
+ylabel('PSD (dB/Hz)');
+xlim([-Rb/2, Rb/2]);
+
+% Data setelah spreading
+subplot(2,1,2);
+[psd_spread, f_spread] = pwelch(spread_data, hamming(min(length(spread_data),1024)), [], [], Rc, 'centered');
+plot(f_spread, 10*log10(psd_spread));
+grid on;
+title('Spektrum Setelah DSSS Spreading');
+xlabel('Frekuensi (Hz)');
+ylabel('PSD (dB/Hz)');
+xlim([-Rc/2, Rc/2]);
+
+%% Analisis Kinerja
+fprintf('Hasil Simulasi DSSS untuk Komunikasi Satelit LPWAN:\n');
+fprintf('Processing Gain: %.1f dB\n', 10*log10(PG));
+fprintf('Path Loss: %.1f dB\n', path_loss_dB);
+
+% Temukan SNR yang memberikan BER 10^-3
+target_BER = 1e-3;
+for i = 1:length(SNR_dB)-1
+    if BER(i) > target_BER && BER(i+1) < target_BER
+        snr_target = SNR_dB(i) + (SNR_dB(i+1)-SNR_dB(i))*(log10(BER(i))-log10(target_BER))/(log10(BER(i))-log10(BER(i+1)));
+        fprintf('SNR yang dibutuhkan untuk BER 10^-3: %.2f dB\n', snr_target);
+        break;
+    end
+end
+
+% Fungsi tambahan untuk menghitung link budget - PERHATIKAN PENAMBAHAN PARAMETER Rc
+calculate_link_budget(fc, satellite_altitude, path_loss_dB, Rc);
+
+function calculate_link_budget(fc, altitude, path_loss, Rc)
+    % Fungsi untuk menghitung link budget
+    c = 3e8;                       % Kecepatan cahaya [m/s]
+    lambda = c/fc;                 % Panjang gelombang [m]
+    tx_power_dBm = 23;             % Daya transmisi satelit [dBm]
+    tx_gain_dB = 3;                % Gain antena transmisi [dB]
+    rx_gain_dB = 10;               % Gain antena penerima [dB]
+    
+    % Konversi altitude ke meter untuk perhitungan
+    distance = altitude * 1000;    % Konversi km ke m
+    
+    % Free space path loss (FSPL)
+    fspl_dB = 20*log10(4*pi*distance/lambda);
+    
+    % Link budget
+    rx_power_dBm = tx_power_dBm + tx_gain_dB + rx_gain_dB - fspl_dB;
+    
+    % Menampilkan hasil
+    fprintf('\nLink Budget Calculation:\n');
+    fprintf('Altitude: %.1f km\n', altitude);
+    fprintf('Carrier Frequency: %.2f MHz\n', fc/1e6);
+    fprintf('Free Space Path Loss: %.1f dB\n', fspl_dB);
+    fprintf('Estimated Received Power: %.1f dBm\n', rx_power_dBm);
+    
+    % Analisis implementasi praktis
+    fprintf('\nParameter untuk Implementasi LPWAN:\n');
+    fprintf('- Daya transmit minimal: %.1f dBm\n', tx_power_dBm);
+    fprintf('- Sensitivitas penerima yang dibutuhkan: %.1f dBm\n', rx_power_dBm - 10);
+    fprintf('- Bandwidth sinyal setelah spreading: %.1f kHz\n', Rc/1000);
+end
