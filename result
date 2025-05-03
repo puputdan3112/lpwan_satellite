@@ -1,0 +1,9 @@
+=== Hasil Simulasi QoS Komunikasi Satelit LoRaWAN ===
+Spreading Factor (SF) | PDR (%) | Delay (ms) | Throughput (bps)
+SF7 | 0.00% | 0.00 ms | 0.00 bps
+SF8 | 0.00% | 0.00 ms | 0.00 bps
+SF9 | 0.00% | 0.00 ms | 0.00 bps
+SF10 | 10.50% | 18.03 ms | 0.31 bps
+SF11 | 96.00% | 18.03 ms | 2.84 bps
+SF12 | 88.50% | 18.03 ms | 2.62 bps
+>> 
