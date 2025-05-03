@@ -1,0 +1,145 @@
+% Simulasi Sederhana QoS Komunikasi Satelit LoRaWAN
+% Program ini menyimulasikan QoS dasar untuk komunikasi satelit LoRaWAN
+
+% Parameter Simulasi
+clear all;
+close all;
+clc;
+
+% Parameter LoRaWAN
+SF = 7:12;                      % Spreading Factor (SF7-SF12)
+BW = 125e3;                     % Bandwidth (Hz)
+Ptx = 14;                       % Daya transmisi (dBm)
+NF = 6;                         % Noise Figure (dB)
+SNR_min = [-7.5, -10, -12.5, -15, -17.5, -20]; % SNR minimum untuk tiap SF
+
+% Parameter Satelit
+satAltitude = 550e3;            % Ketinggian satelit LEO (m)
+earthRadius = 6371e3;           % Jari-jari bumi (m)
+numNodes = 100;                 % Jumlah node LoRaWAN
+simulationTime = 3600;          % Waktu simulasi (detik)
+packetsPerHour = 4;             % Jumlah paket per jam per node
+packetSize = 20;                % Ukuran paket (byte)
+
+% Inisialisasi node dengan posisi acak
+nodePositions = rand(numNodes, 2) * 100e3; % Area 100km x 100km
+
+% Menghitung jumlah total paket yang dikirim selama simulasi
+packetsPerSec = packetsPerHour / 3600;
+totalPackets = numNodes * packetsPerSec * simulationTime;
+
+% Alokasi memori
+packetsTransmitted = zeros(1, length(SF));
+packetsReceived = zeros(1, length(SF));
+totalDelay = zeros(1, length(SF));
+throughput = zeros(1, length(SF));
+
+% Simulasi untuk setiap Spreading Factor
+for sfIdx = 1:length(SF)
+    % Hitung durasi simbol dan paket
+    Ts = (2^SF(sfIdx)) / BW;    % Durasi simbol (s)
+    Tpkt = (packetSize * 8 + 4.25) * Ts; % Durasi paket (s)
+    
+    % Hitung Path Loss untuk setiap node
+    slantRange = sqrt((satAltitude + earthRadius)^2 - earthRadius^2);
+    fspl = 20*log10(4*pi*slantRange*868e6/3e8); % Free space path loss (dB)
+    
+    % Jumlah paket yang dikirim untuk SF ini
+    packetsTransmitted(sfIdx) = totalPackets / length(SF);
+    
+    % Simulasi transmisi paket
+    collidedPackets = 0;
+    receivedPackets = 0;
+    totalDelayTime = 0;
+    
+    % Generate random packet arrivals
+    packetTimes = sort(rand(1, round(packetsTransmitted(sfIdx))) * simulationTime);
+    
+    % Cek kolisi dan SNR untuk setiap paket
+    activePackets = [];
+    for i = 1:length(packetTimes)
+        currentTime = packetTimes(i);
+        
+        % Hapus paket yang sudah selesai
+        activeIdx = [];
+        for j = 1:size(activePackets, 1)
+            if currentTime > activePackets(j, 1) + activePackets(j, 2)
+                activeIdx = [activeIdx j];
+            end
+        end
+        activePackets(activeIdx, :) = [];
+        
+        % Tambah paket baru
+        nodeIdx = randi(numNodes);
+        distance = sqrt(nodePositions(nodeIdx, 1)^2 + nodePositions(nodeIdx, 2)^2 + satAltitude^2);
+        rxPower = Ptx - fspl - 20*log10(distance/slantRange);
+        
+        % Hitung SNR
+        N0 = -174 + 10*log10(BW) + NF; % Noise floor (dBm)
+        SNR = rxPower - N0;
+        
+        % Cek apakah paket dapat diterima berdasarkan SNR
+        if SNR >= SNR_min(sfIdx)
+            % Cek kolisi
+            collision = false;
+            for j = 1:size(activePackets, 1)
+                if currentTime + Tpkt > activePackets(j, 1) && currentTime < activePackets(j, 1) + activePackets(j, 2)
+                    collision = true;
+                    break;
+                end
+            end
+            
+            if ~collision
+                receivedPackets = receivedPackets + 1;
+                totalDelayTime = totalDelayTime + (slantRange/3e8)*2; % RTT delay
+            else
+                collidedPackets = collidedPackets + 1;
+            end
+        end
+        
+        % Tambahkan paket ke daftar aktif
+        activePackets = [activePackets; currentTime, Tpkt];
+    end
+    
+    % Hitung statistik QoS
+    packetsReceived(sfIdx) = receivedPackets;
+    if receivedPackets > 0
+        totalDelay(sfIdx) = totalDelayTime / receivedPackets;
+    else
+        totalDelay(sfIdx) = 0;
+    end
+    throughput(sfIdx) = (packetsReceived(sfIdx) * packetSize * 8) / simulationTime; % bps
+end
+
+% Hitung PDR (Packet Delivery Ratio)
+PDR = packetsReceived ./ packetsTransmitted * 100;
+
+% Visualisasi hasil
+figure(1);
+bar(SF, PDR);
+xlabel('Spreading Factor (SF)');
+ylabel('Packet Delivery Ratio (%)');
+title('PDR vs Spreading Factor');
+grid on;
+
+figure(2);
+bar(SF, totalDelay * 1000);
+xlabel('Spreading Factor (SF)');
+ylabel('Delay (ms)');
+title('Average Delay vs Spreading Factor');
+grid on;
+
+figure(3);
+bar(SF, throughput);
+xlabel('Spreading Factor (SF)');
+ylabel('Throughput (bps)');
+title('Throughput vs Spreading Factor');
+grid on;
+
+% Tampilkan hasil
+disp('=== Hasil Simulasi QoS Komunikasi Satelit LoRaWAN ===');
+disp('Spreading Factor (SF) | PDR (%) | Delay (ms) | Throughput (bps)');
+for i = 1:length(SF)
+    fprintf('SF%d | %.2f%% | %.2f ms | %.2f bps\n', ...
+        SF(i), PDR(i), totalDelay(i)*1000, throughput(i));
+end
